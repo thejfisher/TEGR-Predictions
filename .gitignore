@@ -1,0 +1,30 @@
+# TEGR-Predictions
+# Binary data files
+*.npz
+*.npy
+*.mp4
+*.zip
+*.avi
+*.wav
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Old backup copies
+*_FROM_STASH.py
+*_RELEASE_BACKUP.py
+
+# Logs and temp
+output.log
+auto_push.log
+crash_dump.npz
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large images (keep PNGs under 5MB)
+# *.png  -- we want plots committed

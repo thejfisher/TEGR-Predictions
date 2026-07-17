@@ -1,0 +1,74 @@
+{
+  "experiment": "Aspelmeyer Vienna Baseline — Levitated Optomechanics",
+  "reference": "Delić et al., Science 367, 892 (2020); Neumeier et al., PNAS 121 (2024)",
+  "purpose": "Calibrate TEGR FDTD engine to reproduce Vienna lab quantum ground-state parameters",
+  
+  "physical_parameters": {
+    "particle": {
+      "material": "Silica (SiO2) nanosphere",
+      "radius_nm": 100,
+      "mass_amu": 1e9,
+      "mass_kg": 1.66e-18,
+      "note": "Range 70-140 nm; 10^8 to 10^9 amu. Using 100nm / 10^9 amu as canonical"
+    },
+    "trap": {
+      "type": "Optical tweezer (1064 nm Nd:YAG)",
+      "trapping_frequency_Hz": 300000,
+      "ground_state_width_pm": 4,
+      "note": "300 kHz COM oscillation frequency; ground state ~4 pm spatial width"
+    },
+    "vacuum": {
+      "operating_pressure_mbar": 1e-3,
+      "interference_pressure_mbar": 1e-10,
+      "note": "Need UHV 10^-10 mbar to suppress thermal decoherence for macroscopic interference"
+    },
+    "interference_target": {
+      "free_fall_time_ms": 12,
+      "superposition_width_nm": 12,
+      "note": "After 12ms free-fall, wavepacket expands to ~12nm spatial superposition"
+    }
+  },
+
+  "tegr_engine_mapping": {
+    "electron_baseline": {
+      "m0": 0.511,
+      "C": 100,
+      "dt": 0.001,
+      "wave_speed": 65.0,
+      "note": "Standard Preset 43 electron. This MUST produce clean bands."
+    },
+    "mass_scaling": {
+      "electron_mass_MeV": 0.511,
+      "nanosphere_mass_MeV": "~9.4e14",
+      "ratio": "~1.84e15",
+      "note": "m_nanosphere / m_electron ≈ 1.84 × 10^15. Cannot plug directly — must use dimensionless scaling."
+    },
+    "dimensionless_strategy": {
+      "approach": "Hold C and wave_speed fixed, sweep m0 logarithmically",
+      "m0_sweep_range": [0.1, 0.511, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 938.27, 5000.0, 10000.0, 50000.0],
+      "dt_scaling": "dt = dt_base / sqrt(m0 / m0_electron) to keep CFL stable",
+      "total_ticks_scaling": "total_ticks = base_ticks * sqrt(m0 / m0_electron) to maintain physical time",
+      "note": "Log sweep lets us find the exact m0 where interference transitions to classical"
+    },
+    "confining_force": {
+      "formula": "F_conf = -m0 * omega^2 * r",
+      "omega_trap": "2*pi*300e3 in physical units → mapped to engine via F_conf amplitude",
+      "note": "Tune confining_force in engine to match 4pm ground-state width at each m0"
+    }
+  },
+
+  "decoherence_metrics": {
+    "band_visibility": "Michelson contrast: V = (I_max - I_min) / (I_max + I_min)",
+    "spatial_spread": "Standard deviation σ of screen hit distribution",
+    "slit_to_blob_distance": "Distance from slit wall to first measurable intensity (Jeff's metric)",
+    "kuramoto_coupling": "PySINDy-extracted κ coefficient from RAE",
+    "phase_coherence": "Kuramoto order parameter r = |<e^{iθ}>| across all defects",
+    "sindy_R2": "Goodness of fit — when R² drops, the RAE can no longer describe the dynamics"
+  },
+
+  "penrose_comparison": {
+    "diosi_penrose_formula": "τ_DP = ℏ / E_G where E_G = gravitational self-energy",
+    "tegr_formula": "τ_TEGR = threshold where ∇γ phase-shearing exceeds Kuramoto bounding κsin(θ)",
+    "divergence_test": "If τ_TEGR ≠ τ_DP at same mass, TEGR makes a distinct testable prediction"
+  }
+}
