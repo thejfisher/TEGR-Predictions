@@ -152,7 +152,7 @@ def run_sindy_and_ollama(history, ai_url, ai_model, no_llm=False, run_label="def
         X_features = np.column_stack((X_features, d12, inv_d12_2, inv_d12_3, cos_dhue))
         feature_names += ['d12', '1/d12^2', '1/d12^3', 'cos(d_hue)']
 
-    if N_particles > 2:
+    if N_particles >= 2:
         tracker_pos = history[:, tracker_actual_idx, 1:4]
         tracker_hue_raw = history[:, tracker_actual_idx, 8]
         tracker_mom = history[:, tracker_actual_idx, 4:7]
@@ -211,13 +211,21 @@ def run_sindy_and_ollama(history, ai_url, ai_model, no_llm=False, run_label="def
                 dvx = tracker_vel_t[:, 0] - other_vel_t[:, 0]
                 dvy = tracker_vel_t[:, 1] - other_vel_t[:, 1]
                 dvz = tracker_vel_t[:, 2] - other_vel_t[:, 2]
+                
+                # Correct cross-cross product for Weitzenbock torsion: dx X (dx X dv)
+                # cross_1 = diff X v_diff
                 cx = dy * dvz - dz * dvy
                 cy = dz * dvx - dx * dvz
                 cz = dx * dvy - dy * dvx
+                # cross_2 = diff X cross_1
+                tx = dy * cz - dz * cy
+                ty = dz * cx - dx * cz
+                tz = dx * cy - dy * cx
+                
                 tor_denom = dist_sq**2.0
-                net_tx_t += dx * cx / tor_denom
-                net_ty_t += dy * cy / tor_denom
-                net_tz_t += dz * cz / tor_denom
+                net_tx_t += tx / tor_denom
+                net_ty_t += ty / tor_denom
+                net_tz_t += tz / tor_denom
                 
             net_sync = net_sync_t.cpu().numpy()
             net_fx = net_fx_t.cpu().numpy()
@@ -252,17 +260,24 @@ def run_sindy_and_ollama(history, ai_url, ai_model, no_llm=False, run_label="def
                 dvx = tracker_vel[:, 0] - other_vel[:, 0]
                 dvy = tracker_vel[:, 1] - other_vel[:, 1]
                 dvz = tracker_vel[:, 2] - other_vel[:, 2]
+                
+                # cross_1 = diff X v_diff
                 cx = dy * dvz - dz * dvy
                 cy = dz * dvx - dx * dvz
                 cz = dx * dvy - dy * dvx
+                # cross_2 = diff X cross_1
+                tx = dy * cz - dz * cy
+                ty = dz * cx - dx * cz
+                tz = dx * cy - dy * cx
+                
                 tor_denom = dist_sq**2.0
-                net_tx += dx * cx / tor_denom
-                net_ty += dy * cy / tor_denom
-                net_tz += dz * cz / tor_denom
+                net_tx += tx / tor_denom
+                net_ty += ty / tor_denom
+                net_tz += tz / tor_denom
             
         torsion_mag = np.sqrt(net_tx**2 + net_ty**2 + net_tz**2)
-        X_features = np.column_stack((X_features, net_sync, net_fx, net_fy, net_fz, torsion_mag))
-        feature_names += ['K_sync', 'F_pauli_x', 'F_pauli_y', 'F_pauli_z', 'F_torsion']
+        X_features = np.column_stack((X_features, net_sync, net_fx, net_fy, net_fz, net_tx, net_ty, net_tz, torsion_mag))
+        feature_names += ['K_sync', 'F_pauli_x', 'F_pauli_y', 'F_pauli_z', 'Torsion_Wx', 'Torsion_Wy', 'Torsion_Wz', 'F_torsion_mag']
     
     n_targets = X_targets.shape[0]
     n_features = X_features.shape[0]

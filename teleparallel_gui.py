@@ -3,6 +3,7 @@ import time
 import subprocess
 import shlex
 import json
+import os
 import numpy as np
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
@@ -108,7 +109,9 @@ class PhysicsWorker(QThread):
                 
                 # Quote arguments for shell execution
                 args_str = " ".join([shlex.quote(arg) for arg in args])
-                physics_cmd = f"cd {physics_dir} && python3 -u teleparallel_collider.py {args_str}"
+                # Escape the directory path for the remote bash shell
+                physics_dir_escaped = physics_dir.replace(' ', '\\ ')
+                physics_cmd = f"cd {physics_dir_escaped} && python3 -u teleparallel_collider.py {args_str}"
                 
                 ssh_physics_cmd = ["ssh", f"{physics_user}@{physics_ip}", physics_cmd]
                 self.log_signal.emit(f"Physics launch: {' '.join(ssh_physics_cmd)}")
@@ -205,12 +208,19 @@ class PhysicsWorker(QThread):
                     server_process.kill()
                 
                 # Fetch the aggregate states from the physics node
+                # NOTE: SCP on Windows cannot handle spaces in remote paths
+                # (backslash = path separator, embedded quotes = literal chars).
+                # Instead, pipe the file through SSH + cat, which already works.
                 self.log_signal.emit(f"[PIPELINE] Fetching aggregate_states.npz from {physics_user}@{physics_ip}...")
-                scp_cmd = ["scp", f"{physics_user}@{physics_ip}:{physics_dir}/aggregate_states.npz", "./aggregate_states.npz"]
-                self.log_signal.emit(f"Running: {' '.join(scp_cmd)}")
+                physics_dir_escaped = physics_dir.replace(' ', '\\ ')
+                ssh_cat_cmd = ["ssh", f"{physics_user}@{physics_ip}",
+                               f"cat {physics_dir_escaped}/aggregate_states.npz"]
+                self.log_signal.emit(f"Running: {' '.join(ssh_cat_cmd)}")
                 try:
-                    subprocess.run(scp_cmd, check=True, capture_output=True, text=True)
-                    self.log_signal.emit("[PIPELINE] Successfully downloaded aggregate_states.npz")
+                    result = subprocess.run(ssh_cat_cmd, check=True, capture_output=True)
+                    with open("./aggregate_states.npz", "wb") as f:
+                        f.write(result.stdout)
+                    self.log_signal.emit(f"[PIPELINE] Successfully downloaded aggregate_states.npz ({len(result.stdout)} bytes)")
                 except subprocess.CalledProcessError as e:
                     self.log_signal.emit(f"[PIPELINE ERROR] Failed to download aggregate_states.npz: {e.stderr}")
 
@@ -539,7 +549,8 @@ class TeleparallelGUI(QMainWindow):
             "einstein-stick", "direct-collapse", "gravity-sink",
             "holographic", "holographic-shell", "holographic-ring",
             "antenna", "ads-cft", "head-on", "photoelectric", "qed",
-            "3-body-scatter", "3-body-orbit", "pilot-wave", "string-sink"
+            "3-body-scatter", "3-body-orbit", "pilot-wave", "string-sink",
+            "bodies-of-orbit"
         ])
         self.mode_combo.setStyleSheet("QComboBox { font-size: 15px; padding: 8px; color: #00e5ff; font-weight: bold; }")
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
@@ -553,7 +564,7 @@ class TeleparallelGUI(QMainWindow):
         self.preset_container = QWidget()
         preset_layout_inner = QVBoxLayout(self.preset_container)
         self.preset_combo = NoScrollComboBox()
-        self.preset_combo.addItems(["0. Custom", "1. 1-Layer Classical Scatter", "2. 5-Layer Phase Router", "3. 3D Phase Router (5x3)", "4. AMPS Firewall (Gravity Sink)", "5. Direct Collapse (N-Body)", "6. Delayed Choice Quantum Eraser", "7. Delayed Choice (Heat Sink Eraser)", "8. Veneziano Amplitude (Soft Scattering)", "9. Photoelectric Effect", "10. Holographic Entanglement", "11. Holographic Shell (Dark Matter Void)", "12. Holographic Ring (Accretion Void)", "13. Quantum Electrodynamics (QED)", "14. Gravitational Wave (NANOGrav)", "15. GHZ Entanglement (Active Firewall)", "16. High-Gamma Test Preset", "17. The Mark Thompson Experiment", "18. Stochastic Hum (Mark Thompson Phase 2)", "19. Mass Sweep: Electron (0.511 MeV)", "20. Mass Sweep: Pion (134.98 MeV)", "21. Mass Sweep: Kaon (493.68 MeV)", "22. Mass Sweep: Proton (938.27 MeV)", "23. Mass Sweep: 4xProton (3753.05 MeV)", "24. Direct Collapse (N=10)", "25. Single-Slit Control", "26. Doubled Separation (d=12.0)", "27. Einstein's Stick (Classical)", "28. Einstein's Stick (Entangled)", "29. AdS-CFT Correspondence", "30. Pilot Wave (de Broglie-Bohm)", "31. Pilot Wave Double-Slit (Histogram)", "32. Couder Pilot Wave (Memory Bath)", "33. Couder Pilot Wave (Interference Capture)", "34. SR Time Dilation (Proper Time)", "35. Twin Paradox (Tau Comparison)", "36. Kepler Orbit (Newtonian)", "37. Gravity Slide (Terminator)", "38. Couder Pilot Wave (CFL Unlocked c=100)", "39. Bohmian Reverse (PDH 1979 Verification)", "40. Experimental Reverse Validation (Tonomura)", "41. Analytical Wave Initialization (Plane Wave)", "42. MOSFET Corner Diffraction (Leakage)", "43. MOSFET Plane Wave (Corner + dBB)", "44. Simple Collider (Sandbox)", "45. Quantum Tunneling (Pauli Barrier)", "46. Kepler Orbit (Vanishing Sun)", "47. RAE v2.1 Validation Matrix (Batch)", "48. Arndt Sweep 1: Sub-electron (m=0.1)", "49. Arndt Sweep 2: Light (m=0.3)", "50. Arndt Sweep 3: Electron (m=0.511)", "51. Arndt Sweep 4: Transition (m=0.75)", "52. Arndt Sweep 5: 2x Electron (m=1.0)", "53. Arndt Sweep 6: 4x Electron (m=2.0)", "54. Arndt Sweep 7: 10x Electron (m=5.0)", "55. RAE Mass Explorer (Free Slider)", "56. RAE Compensated Sweep (7-Run Batch)", "57. Manuscript 8 Validation Matrix (Batch)"])
+        self.preset_combo.addItems(["0. Custom", "1. 1-Layer Classical Scatter", "2. 5-Layer Phase Router", "3. 3D Phase Router (5x3)", "4. AMPS Firewall (Gravity Sink)", "5. Direct Collapse (N-Body)", "6. Delayed Choice Quantum Eraser", "7. Delayed Choice (Heat Sink Eraser)", "8. Veneziano Amplitude (Soft Scattering)", "9. Photoelectric Effect", "10. Holographic Entanglement", "11. Holographic Shell (Dark Matter Void)", "12. Holographic Ring (Accretion Void)", "13. Quantum Electrodynamics (QED)", "14. Gravitational Wave (NANOGrav)", "15. GHZ Entanglement (Active Firewall)", "16. High-Gamma Test Preset", "17. The Mark Thompson Experiment", "18. Stochastic Hum (Mark Thompson Phase 2)", "19. Mass Sweep: Electron (0.511 MeV)", "20. Mass Sweep: Pion (134.98 MeV)", "21. Mass Sweep: Kaon (493.68 MeV)", "22. Mass Sweep: Proton (938.27 MeV)", "23. Mass Sweep: 4xProton (3753.05 MeV)", "24. Direct Collapse (N=10)", "25. Single-Slit Control", "26. Doubled Separation (d=12.0)", "27. Einstein's Stick (Classical)", "28. Einstein's Stick (Entangled)", "29. AdS-CFT Correspondence", "30. Pilot Wave (de Broglie-Bohm)", "31. Pilot Wave Double-Slit (Histogram)", "32. Couder Pilot Wave (Memory Bath)", "33. Couder Pilot Wave (Interference Capture)", "34. SR Time Dilation (Proper Time)", "35. Twin Paradox (Tau Comparison)", "36. Kepler Orbit (Newtonian)", "37. Gravity Slide (Terminator)", "38. Couder Pilot Wave (CFL Unlocked c=100)", "39. Bohmian Reverse (PDH 1979 Verification)", "40. Experimental Reverse Validation (Tonomura)", "41. Analytical Wave Initialization (Plane Wave)", "42. MOSFET Corner Diffraction (Leakage)", "43. MOSFET Plane Wave (Corner + dBB)", "44. Simple Collider (Sandbox)", "45. Quantum Tunneling (Pauli Barrier)", "46. Kepler Orbit (Vanishing Sun)", "47. RAE v2.1 Validation Matrix (Batch)", "48. Arndt Sweep 1: Sub-electron (m=0.1)", "49. Arndt Sweep 2: Light (m=0.3)", "50. Arndt Sweep 3: Electron (m=0.511)", "51. Arndt Sweep 4: Transition (m=0.75)", "52. Arndt Sweep 5: 2x Electron (m=1.0)", "53. Arndt Sweep 6: 4x Electron (m=2.0)", "54. Arndt Sweep 7: 10x Electron (m=5.0)", "55. RAE Mass Explorer (Free Slider)", "56. RAE Compensated Sweep (7-Run Batch)", "57. Manuscript 8 Validation Matrix (Batch)", "58. The Heisenberg Cut (Mass Sweep)", "59. Pilot Wave Wake Extraction", "60. Kepler Wake Orbit (No Analytical Gravity)", "61. Pure Torsional Drag (No Grid)", "62. Bodies of Orbit (Venus Circular)", "63. Bodies of Orbit (Venus Elliptical)"])
         self.preset_combo.currentIndexChanged.connect(self.apply_preset)
         preset_layout_inner.addWidget(self.preset_combo)
         preset_group_layout = QVBoxLayout()
@@ -583,6 +594,14 @@ class TeleparallelGUI(QMainWindow):
 
         add_input("num_particles", "10000", beam_layout)
         add_input("mass_a", "1.0", beam_layout)
+        
+        self.sync_momentum_cb = QCheckBox("Sync Momentum to Mass (Constant Velocity)")
+        self.sync_momentum_cb.setChecked(False)
+        self.sync_momentum_cb.setStyleSheet("QCheckBox { color: #4CAF50; font-weight: bold; }")
+        self.sync_momentum_cb.toggled.connect(self.sync_momentum_to_mass)
+        self.inputs["mass_a"].textChanged.connect(self.sync_momentum_to_mass)
+        beam_layout.addRow(self.sync_momentum_cb)
+        
         add_input("mass_b", "1.0", beam_layout)
         add_input("beam_momentum", "5000.0", beam_layout)
         add_input("impact_parameter", "0.5", beam_layout)
@@ -809,6 +828,9 @@ class TeleparallelGUI(QMainWindow):
         add_input("sink_mass", "50000.0", gravity_layout)
         add_input("collapse_radius", "20.0", gravity_layout)
         add_input("collapse_G", "1.0", gravity_layout)
+        add_input("eccentricity", "0.0", gravity_layout)
+        add_input("free_flight_tick", "-1", gravity_layout)
+        add_input("sindy_gm", "19732.53", gravity_layout)
         add_input("amps_cooling_cap", "1.0", gravity_layout)
 
         self.vanish_sink_cb = QCheckBox("Vanish Sink at 50% Time (Einstein vs Newton)")
@@ -820,6 +842,13 @@ class TeleparallelGUI(QMainWindow):
         self.fdtd_gravity_cb.setChecked(False)
         self.fdtd_gravity_cb.setStyleSheet("QCheckBox { color: #2196F3; }")
         gravity_layout.addRow(self.fdtd_gravity_cb)
+
+        self.pde_export_cb = QCheckBox("Export PDE Grid (Cost of Existence)")
+        self.pde_export_cb.setChecked(False)
+        self.pde_export_cb.setStyleSheet("QCheckBox { color: #9C27B0; }")
+        gravity_layout.addRow(self.pde_export_cb)
+        add_input("pde_crop_size", "60.0", gravity_layout)
+        add_input("pde_save_interval", "10", gravity_layout)
 
         left_layout.addWidget(self.gravity_group)
 
@@ -924,7 +953,7 @@ class TeleparallelGUI(QMainWindow):
         
         self.physics_ip_input = QLineEdit("100.122.147.67")
         self.physics_user_input = QLineEdit("thejfisher")
-        self.physics_dir_input = QLineEdit("~/AI_Vault/teleparallel_sim_photons")
+        self.physics_dir_input = QLineEdit("~/AI_Vault/TEGR Collider")
         
         self.buffer_ip_input = QLineEdit("100.66.100.83")
         self.buffer_user_input = QLineEdit("hal")
@@ -1050,6 +1079,7 @@ class TeleparallelGUI(QMainWindow):
             "pilot-wave": ["beam", "slit", "forces", "wave", "sim"],
             "string-sink": ["beam", "forces", "gravity", "sim"],
             "simple-collider": ["beam", "forces", "sim"],
+            "bodies-of-orbit": ["beam", "forces", "gravity", "wave", "sim"],
         }
         
         all_groups = ["beam", "slit", "forces", "wave", "detector", "gravity", "entangle", "antenna"]
@@ -1070,6 +1100,17 @@ class TeleparallelGUI(QMainWindow):
 
     # ==========================================
     # --- RAE Mass Explorer: Auto-compute derived parameters ---
+    def sync_momentum_to_mass(self):
+        if not hasattr(self, 'sync_momentum_cb') or not self.sync_momentum_cb.isChecked():
+            return
+        try:
+            m = float(self.inputs["mass_a"].text())
+            if m <= 0: return
+            p = m * 100.0
+            self.inputs["beam_momentum"].setText(f"{p:.2f}")
+        except (ValueError, AttributeError):
+            pass
+
     def auto_compute_rae_from_mass(self):
         """When RAE Mass Explorer is active, auto-fill momentum/kappa/grad/amp
         from the current mass_a value using the theoretical RAE linear scaling."""
@@ -2573,6 +2614,483 @@ class TeleparallelGUI(QMainWindow):
                 self.batch_label.setVisible(True)
 
 
+        elif text == "The Heisenberg Cut (Mass Sweep)":
+            # ================================================================
+            # PRESET 58: Aspelmeyer Mass Sweep — Batched 20-Run Campaign
+            # ================================================================
+            # PURPOSE: Automated mass sweep to find the decoherence threshold.
+            # Cloned from Preset 43 (verified 4,235/10,000 hits on 2026-07-17).
+            # Only mass_a changes between runs — everything else is locked.
+            #
+            # BATCH STRUCTURE: 20 runs across a log-scale mass range:
+            #   0.1 → 0.511 (sub-electron → electron baseline)
+            #   0.75 → 5.0  (transition zone)
+            #   10 → 50,000 (heavy particle → boundary test)
+            #
+            # Each run: ~3 min on thejfisher GPU = ~60 min total.
+            # Results auto-saved to sweep_results/ (plot PNG + raw .npz).
+            #
+            # SCIENTIFIC GOAL: Find where interference bands collapse.
+            # Compare TEGR kinematic phase-shearing (Cost of Existence overflow)
+            # against Penrose gravitational self-energy (tau_DP = hbar/E_G).
+            #
+            # ARCHITECTURE: Each run goes through the tri-node SSH pipeline:
+            #   GUI (this PC) -> SSH -> thejfisher (CUDA physics)
+            #   -> ZMQ -> hal (AMD SINDy extraction) -> results back
+            #
+            # KEY PHYSICS (same for ALL runs in the sweep):
+            #   - RAE mode ON (Relativistic Adler Equation)
+            #   - dBB guidance ON but photon_emission OFF (inactive, see notes)
+            #   - Plane wave init ON (coherent FDTD seed)
+            #   - Pauli=10 hardened wall, vacuum=0.007, torsion=1.0
+            #
+            # REFERENCE PAPERS:
+            #   1. Delic et al. (2020) Science 367 — Lab baseline
+            #   2. Romero-Isart et al. (2011) PRL 107 — Double-slit blueprint
+            #   3. Kaltenbaek et al. (2016) EPJ QT 3 — MAQRO thresholds
+            #   4. Penrose (1996) Gen. Rel. Grav. 28 — Gravitational collapse
+            # ================================================================
+            
+            self.batch_queue = []
+            
+            # --- Mass sweep range (log-scale, 20 values) ---
+            # Sub-electron → electron → transition → heavy → ultra-heavy
+            sweep_masses = [
+                0.1, 0.2, 0.3, 0.511,          # Sub-electron → electron
+                0.75, 1.0, 1.5, 2.0,            # Electron → 2x electron
+                5.0, 10.0, 20.0, 50.0,          # Transition zone
+                100.0, 200.0, 500.0,             # Heavy particle
+                1000.0, 2000.0, 5000.0,          # Ultra-heavy
+                10000.0, 50000.0, 100000.0,      # Boundary test
+            ]
+            
+            def make_sweep_setup(mass_val):
+                """Factory: returns a setup closure that configures all GUI
+                widgets to the Preset 43 golden baseline with the given mass.
+                Every parameter is identical across runs except mass_a."""
+                def setup():
+                    # --- Mode ---
+                    self.mode_combo.setCurrentText("double-slit")
+                    
+                    # --- Beam & Particles ---
+                    self.inputs["num_particles"].setText("10000")
+                    self.inputs["mass_b"].setText("1.0")
+                    self.inputs["beam_momentum"].setText("10.0")
+                    self.inputs["mass_a"].setText(str(mass_val))  # THE SWEEP VARIABLE
+                    self.inputs["batch_size"].setText("10000")
+                    
+                    # --- Slit Geometry ---
+                    self.inputs["slit_width"].setText("5.0")
+                    self.inputs["slit_separation"].setText("6.0")
+                    self.inputs["wall_z_layers"].setText("1")
+                    self.inputs["wall_depth"].setText("3")
+                    self.inputs["num_slits"].setText("2")
+                    self.inputs["screen_x"].setText("20.0")
+                    self.inputs["beam_start_x"].setText("-10.0")
+                    
+                    # --- Timing ---
+                    self.inputs["dt"].setText("0.001")
+                    self.inputs["total_ticks"].setText("3000")
+                    
+                    # --- Wave / Vacuum Grid ---
+                    self.inputs["wave_speed"].setText("65.0")
+                    self.inputs["wave_dissipation"].setText("0.9999")
+                    self.inputs["jitter_amp"].setText("0.0")
+                    
+                    # --- Force Couplings ---
+                    self.inputs["pauli"].setText("10.0")
+                    self.inputs["vacuum"].setText("0.007")
+                    self.inputs["torsion"].setText("1.0")
+                    
+                    # --- Toggles ---
+                    self.inputs["entangled"].setText("0")
+                    self.paper1_exact_cb.setChecked(False)
+                    self.spin_coupling_cb.setChecked(False)
+                    self.thermal_bath_cb.setChecked(False)
+                    self.eraser_active_cb.setChecked(False)
+                    self.pauli_power_combo.setCurrentIndex(0)
+                    
+                    # --- Pilot Wave + dBB ---
+                    # dBB guidance ON + photon_emission OFF = standard force path
+                    # (dBB velocity override requires BOTH; it does NOT fire here)
+                    self.photon_emission_cb.setChecked(False)
+                    self.breit_wheeler_cb.setChecked(False)
+                    self.bw_threshold_input.setText("2.044")
+                    self.pilot_wave_cb.setChecked(True)
+                    self.dbb_guidance_cb.setChecked(True)
+                    self.dbb_strength_input.setText("0.01")
+                    self.reverse_integration_cb.setChecked(False)
+                    
+                    # --- Plane Wave ---
+                    self.plane_wave_init_cb.setChecked(True)
+                    self.plane_wave_amp_input.setText("20.0")
+                    
+                    # --- RAE (non-negotiable) ---
+                    self.rae_mode_cb.setChecked(True)
+                    self.inputs["rae_kappa_scale"].setText("1.0")
+                    self.inputs["rae_grad_scale"].setText("1.0")
+                return setup
+            
+            # --- Build the batch queue: one run per mass ---
+            for m in sweep_masses:
+                label = f"Heisenberg Cut Sweep m={m}"
+                self.batch_queue.append({"label": label, "setup_fn": make_sweep_setup(m)})
+            
+            if self.batch_queue:
+                self._batch_total = len(self.batch_queue)
+                self.batch_queue[0]["setup_fn"]()
+                self.batch_label.setText(f"BATCH QUEUED: {len(self.batch_queue)} runs | Next: {self.batch_queue[0]['label']}")
+                self.batch_label.setVisible(True)
+
+
+        elif text == "Pilot Wave Wake Extraction":
+            # ================================================================
+            # PRESET 59: Pilot Wave Wake Extraction
+            # ================================================================
+            # PURPOSE: Measure the torsional pilot wave (the "wake") itself.
+            # Instead of 10,000 particles through a slit, we run just 2
+            # particles in open space with the FDTD vacuum grid active.
+            # This isolates the wake from a SINGLE defect so SINDy can
+            # extract its governing differential equations cleanly.
+            #
+            # THE QUESTION: Is the wake constant? Does it grow? Decay?
+            # How does it relate to gravity? The wake IS the torsional
+            # strain in the Weitzenboeck lattice — in TEGR, that IS the
+            # gravitational field. By extracting d(F_torsion)/dt,
+            # d(hue)/dt (phase clock), and d(K_sync)/dt (Kuramoto order)
+            # we get the actual differential equations of the wake.
+            #
+            # WHAT TO LOOK FOR IN THE SINDY OUTPUT:
+            #   - hue' equation: This IS the Adler equation for the phase
+            #     clock. The R^2 should be ~0.999 (it's always the best fit).
+            #     The coefficients tell you the balance between the phase
+            #     driving term (m0/gamma) and the damping (kappa*sin).
+            #   - F_torsion correlation: How does the torsional wake force
+            #     correlate with position (x,y,z), velocity (gamma), and
+            #     phase (hue)? This IS the gravity signature.
+            #   - K_sync = sin(hue) = the Kuramoto synchronization order.
+            #     Its time derivative IS the phase-shearing rate.
+            #
+            # SETUP: simple-collider mode = 2 particles in open space.
+            # Particle A (tracker, mass_a) starts left, moves right.
+            # Particle B (mass_b) starts right, moves left.
+            # They pass each other, exchanging torsional wake information.
+            # The FDTD grid records the entire wake evolution.
+            #
+            # TIMING: dt=0.001 with 10,000 ticks = 10.0 time units.
+            # Long run lets the wake fully develop, propagate, and
+            # interact. Fine timestep captures the dynamics accurately.
+            #
+            # FDTD GRID: 60x60x60 (GRID_MAX=30 for simple-collider).
+            # wave_dissipation=0.99999 — almost zero damping so the
+            # wake persists and we can watch it evolve.
+            # wave_speed=65.0 — same as the verified Preset 43 baseline.
+            # ================================================================
+            
+            # --- Mode: 2-body open space ---
+            self.mode_combo.setCurrentText("simple-collider")
+            
+            # --- Particles: Just 2 for clean wake isolation ---
+            # Particle A (tracker) = the defect whose wake we measure
+            # mass_a = 0.511 (electron) — our calibrated baseline mass
+            self.inputs["num_particles"].setText("2")
+            self.inputs["mass_a"].setText("0.511")           # Defect mass (sweep target)
+            self.inputs["mass_b"].setText("0.511")           # Same mass = symmetric wake
+            self.inputs["beam_momentum"].setText("5.0")      # Moderate speed
+            self.inputs["impact_parameter"].setText("2.0")   # Offset so they pass, not collide
+            
+            # --- Force Couplings ---
+            # Pauli=50 gives clean scattering without overlap
+            # vacuum=0.001 — very low damping, let the wake breathe
+            # torsion=1.0 — the Weitzenboeck coupling we're measuring
+            self.inputs["pauli"].setText("50.0")
+            self.inputs["vacuum"].setText("0.001")
+            self.inputs["torsion"].setText("1.0")
+            
+            # --- Timing: Long run, fine timestep ---
+            # 10,000 ticks at dt=0.001 = 10 time units of evolution
+            # Plenty of time for wake to develop and propagate
+            self.inputs["dt"].setText("0.001")
+            self.inputs["total_ticks"].setText("10000")
+            
+            # --- Wave / FDTD Grid ---
+            # wave_dissipation=0.99999 — near-zero damping preserves wake
+            # wave_speed=65 — matched to Preset 43 baseline
+            # jitter=0 — no noise, clean wake signal
+            self.inputs["wave_speed"].setText("65.0")
+            self.inputs["wave_dissipation"].setText("0.99999")
+            self.inputs["jitter_amp"].setText("0.0")
+            
+            # --- Toggles ---
+            self.inputs["entangled"].setText("0")
+            self.inputs["galactic_spin"].setText("0.0")
+            self.paper1_exact_cb.setChecked(False)
+            self.spin_coupling_cb.setChecked(True)           # Spin-torsion coupling ON
+            self.thermal_bath_cb.setChecked(False)
+            self.eraser_active_cb.setChecked(False)
+            self.pauli_power_combo.setCurrentIndex(0)        # 1/r^3 KK signature
+            
+            # --- Pilot Wave: THE WHOLE POINT ---
+            # This activates the FDTD vacuum grid so the defect
+            # actually creates a wake as it moves. Without this,
+            # there's no wave to measure.
+            self.pilot_wave_cb.setChecked(True)
+            self.photon_emission_cb.setChecked(False)
+            self.breit_wheeler_cb.setChecked(False)
+            self.dbb_guidance_cb.setChecked(False)           # OFF — we want the wake to evolve naturally
+            self.reverse_integration_cb.setChecked(False)
+            self.plane_wave_init_cb.setChecked(False)        # OFF — NO seed wave, let the defect CREATE the wake from nothing
+            
+            # --- RAE: Phase clock extraction ---
+            # RAE gives us the unified phase equation:
+            #   hue' = alpha*(m0/gamma) - kappa*sin(hue) + grad_phi
+            # SINDy should recover this equation with R^2 ~ 0.999.
+            # The coefficients ARE the differential equation of the wake.
+            self.rae_mode_cb.setChecked(True)
+            self.inputs["rae_kappa_scale"].setText("1.0")
+            self.inputs["rae_grad_scale"].setText("1.0")
+
+        elif text == "Kepler Wake Orbit (No Analytical Gravity)":
+            # ================================================================
+            # PRESET 60: Kepler Wake Orbit — NO Analytical Gravity
+            # ================================================================
+            # THE ULTIMATE TEST: Can the torsional wake alone produce
+            # a stable orbit?
+            #
+            # We use gravity-sink mode for the orbital GEOMETRY (particle
+            # A at radius r=20 with tangential momentum, particle B at
+            # origin as the massive anchor), but we KILL the hardcoded
+            # Newtonian gravity by setting:
+            #   sink_mass = 0.0
+            #   collapse_G = 0.0
+            #
+            # This means line 1393 in the collider:
+            #   grav_force = -(G * M * m0) * diff_grav / (dist_grav_sq ** 1.5)
+            # becomes:
+            #   grav_force = -(0 * 0 * m0) * diff_grav / ... = 0
+            #
+            # The ONLY forces are:
+            #   1. Pauli repulsion (1/r^3) — prevents overlap
+            #   2. Torsion coupling — spin-vorticity interaction
+            #   3. Pilot wave (FDTD grid) — the torsional wake
+            #   4. RAE phase dynamics — the Adler/Kuramoto equation
+            #
+            # IF THE SATELLITE ORBITS: The wake IS gravity. G_eff
+            #   emerges from the lattice coupling parameters.
+            # IF IT FLIES STRAIGHT: The wake is too weak at this scale
+            #   to bind an orbit, and we need to amplify the coupling.
+            #
+            # COMPARISON: Run Preset 36 first (Newtonian), then run
+            # this Preset 60 (wake only). Compare the trajectory in the
+            # 3D viewer. If Preset 60 curves even slightly inward,
+            # that curvature IS the emergent gravitational deflection.
+            #
+            # GEOMETRY (copied from Preset 36):
+            #   Particle A: mass_a=0.511, starts at x=20, py=0.272
+            #   Particle B: mass_b=100.0 (heavy anchor at origin)
+            #   impact_parameter not used (B placed at 5*r0 by code)
+            #
+            # TIMING: 120k ticks at dt=0.005 = 600 time units
+            # Same as Preset 36 so we can directly compare trajectories.
+            # ================================================================
+            
+            # --- Mode: gravity-sink gives us the orbital geometry ---
+            self.mode_combo.setCurrentText("gravity-sink")
+            
+            # --- Particles ---
+            # A = light satellite (electron mass), B = heavy anchor
+            # mass_b = 100.0 because the anchor needs to be massive
+            # enough to create a significant torsional wake in the FDTD
+            # grid. The heavier the anchor, the stronger its phase clock
+            # pumps the lattice.
+            self.inputs["num_particles"].setText("2")
+            self.inputs["mass_a"].setText("0.511")         # Satellite (electron)
+            self.inputs["mass_b"].setText("100.0")          # Heavy anchor at origin
+            
+            # --- Orbital Parameters ---
+            # collapse_radius = starting orbital radius
+            # beam_momentum = tangential momentum (perpendicular to radius)
+            # For a circular orbit: v_circ = sqrt(G_eff * M / r)
+            # We don't know G_eff yet, so we start with the same p=0.272
+            # as Preset 36. If the wake is weaker than Newton, the
+            # satellite will fly off. If stronger, it spirals in.
+            self.inputs["collapse_radius"].setText("20.0")   # Orbital radius
+            self.inputs["beam_momentum"].setText("0.272")    # Tangential p (same as P36)
+            self.inputs["impact_parameter"].setText("5.0")   # B placed at 5*r0
+            
+            # --- KILL ANALYTICAL GRAVITY ---
+            # sink_mass=0 and collapse_G=0 ensures the Newtonian
+            # force equation produces EXACTLY zero.
+            self.inputs["sink_mass"].setText("0.0")          # NO hardcoded gravity mass
+            self.inputs["collapse_G"].setText("0.0")         # NO gravitational constant
+            
+            # --- Force Couplings ---
+            # Pauli kept moderate to prevent overlap but not dominate
+            # Torsion = 1.0 (the Weitzenboeck coupling)
+            # Vacuum very low — let the wake persist
+            self.inputs["pauli"].setText("10.0")             # Moderate exclusion
+            self.inputs["vacuum"].setText("0.001")           # Near-zero damping
+            self.inputs["torsion"].setText("1.0")            # Torsion coupling
+            self.inputs["entangled"].setText("0")
+            
+            # --- Timing: Same as Preset 36 for comparison ---
+            self.inputs["dt"].setText("0.005")
+            self.inputs["total_ticks"].setText("20000")     # Reduced from 120k to 20k for faster testing (~1-2 mins)
+            self.inputs["galactic_spin"].setText("0.0")
+            self.inputs["amps_cooling_cap"].setText("1.0")
+            
+            # --- Wave / FDTD Grid ---
+            self.inputs["wave_speed"].setText("65.0")
+            self.inputs["wave_dissipation"].setText("0.99999")  # Near-zero damping
+            self.inputs["jitter_amp"].setText("0.0")
+            
+            # --- Toggles ---
+            self.paper1_exact_cb.setChecked(False)
+            self.thermal_bath_cb.setChecked(False)
+            self.spin_coupling_cb.setChecked(True)           # Spin-torsion ON
+            self.eraser_active_cb.setChecked(False)
+            self.pauli_power_combo.setCurrentIndex(0)        # 1/r^3
+            self.photon_emission_cb.setChecked(True)         # MUST BE TRUE to inject wake into lattice
+
+            
+            # --- PILOT WAVE: This is the gravity source ---
+            # The FDTD grid IS the Weitzenboeck lattice.
+            # The heavy anchor at the origin pumps its phase clock
+            # into the grid, creating a standing torsional dent.
+            # The satellite surfs that dent.
+            self.pilot_wave_cb.setChecked(True)
+            self.dbb_guidance_cb.setChecked(False)
+            self.plane_wave_init_cb.setChecked(False)        # No seed — wake from nothing
+            self.breit_wheeler_cb.setChecked(False)
+            self.reverse_integration_cb.setChecked(False)
+            
+            # --- FDTD Gravity: OFF ---
+            # We do NOT want the manual grid denting (line 1240-1243).
+            # We want the particles' own pilot wave emission to be the
+            # only source of lattice strain.
+            self.fdtd_gravity_cb.setChecked(False)
+            
+            # --- RAE: Phase clock extraction ---
+            self.rae_mode_cb.setChecked(True)
+            self.inputs["rae_kappa_scale"].setText("1.0")
+            self.inputs["rae_grad_scale"].setText("1.0")
+            
+        elif text.startswith("61"):
+            # PRESET 61: Pure Torsional Drag (No Eulerian Grid)
+            self.mode_combo.setCurrentText("simple-collider")
+            
+            # Two identical particles
+            self.inputs["num_particles"].setText("2")
+            self.inputs["mass_a"].setText("0.511")
+            self.inputs["mass_b"].setText("0.511")
+            
+            # Clean trajectory: no analytical gravity
+            self.inputs["sink_mass"].setText("0.0")
+            self.inputs["collapse_G"].setText("0.0")
+            
+            # Pure Torsion & Pauli forces (Direct particle-particle interaction)
+            self.inputs["pauli"].setText("10.0")
+            self.inputs["vacuum"].setText("0.001")
+            self.inputs["torsion"].setText("1.0")
+            self.inputs["entangled"].setText("0")
+            
+            # Let them scatter (y vs y impact)
+            self.inputs["impact_parameter"].setText("5.0")
+            self.inputs["beam_momentum"].setText("0.272")
+            
+            # Short run for quick validation
+            self.inputs["dt"].setText("0.005")
+            self.inputs["total_ticks"].setText("3000")
+            
+            # DISABLE ALL GRID / PILOT WAVE MECHANICS
+            self.pilot_wave_cb.setChecked(False)
+            self.photon_emission_cb.setChecked(False)
+            self.fdtd_gravity_cb.setChecked(False)
+            self.dbb_guidance_cb.setChecked(False)
+            
+            # Keep spin coupling enabled for the drag effect
+            self.spin_coupling_cb.setChecked(True)
+            self.pauli_power_combo.setCurrentIndex(0) # 1/r^3
+            self.rae_mode_cb.setChecked(True)
+
+        elif text == "Bodies of Orbit (Venus Circular)":
+            # PRESET 62: Bodies of Orbit — Kinematic Constraining
+            # Venus rides a forced circular track. Sun is frozen at origin.
+            # The FDTD grid reacts to the motion. SINDy extracts G_eff.
+            self.mode_combo.setCurrentText("bodies-of-orbit")
+            
+            # Two bodies: Sun (frozen) and Venus (forced track)
+            self.inputs["num_particles"].setText("2")
+            self.inputs["mass_a"].setText("1.0")       # Venus mass
+            self.inputs["mass_b"].setText("1.0")
+            
+            # Orbital parameters
+            self.inputs["sink_mass"].setText("408670.0")    # Sun mass
+            self.inputs["collapse_radius"].setText("20.0")  # Orbital radius
+            self.inputs["collapse_G"].setText("1.0")
+            self.inputs["beam_momentum"].setText("0.05")     # Angular velocity (omega): v = 0.05 * 20 = 1.0 << c=100
+            
+            # No Pauli — pure gravity test
+            self.inputs["pauli"].setText("0.0")
+            self.inputs["vacuum"].setText("0.001")
+            self.inputs["torsion"].setText("1.0")
+            self.inputs["entangled"].setText("0")
+            
+            # Simulation parameters
+            self.inputs["dt"].setText("0.001")
+            self.inputs["total_ticks"].setText("4000")
+            self.inputs["wave_speed"].setText("100.0")
+            
+            # Enable FDTD pilot wave grid (the point of this experiment)
+            self.pilot_wave_cb.setChecked(True)
+            self.photon_emission_cb.setChecked(False)
+            self.fdtd_gravity_cb.setChecked(False)
+            self.dbb_guidance_cb.setChecked(False)
+            self.spin_coupling_cb.setChecked(False)
+            self.rae_mode_cb.setChecked(True)
+            self.inputs["eccentricity"].setText("0.0")
+
+        elif text == "Bodies of Orbit (Venus Elliptical)":
+            # PRESET 63: Bodies of Orbit — True Keplerian Ellipse
+            # Venus rides its REAL elliptical track (e=0.0067).
+            # The eccentricity breaks the multicollinearity that corrupted
+            # the SINDy coefficients in the circular run (Preset 62).
+            # omega = pi/2 ≈ 1.5708 gives one full orbit per 4 sim-seconds.
+            # 8000 ticks at dt=0.001 = 8 seconds = 2 complete orbits.
+            self.mode_combo.setCurrentText("bodies-of-orbit")
+            
+            # Two bodies: Sun (frozen) and Venus (forced Kepler track)
+            self.inputs["num_particles"].setText("2")
+            self.inputs["mass_a"].setText("1.0")       # Venus mass
+            self.inputs["mass_b"].setText("1.0")
+            
+            # Orbital parameters — Real Venus eccentricity
+            self.inputs["sink_mass"].setText("408670.0")          # Sun mass
+            self.inputs["collapse_radius"].setText("20.0")        # Semi-major axis
+            self.inputs["collapse_G"].setText("1.0")
+            self.inputs["eccentricity"].setText("0.0067")         # Venus eccentricity
+            self.inputs["free_flight_tick"].setText("4000")       # Release tracks after 1 full orbit
+            self.inputs["sindy_gm"].setText("19732.53")           # SINDy-derived GM
+            self.inputs["beam_momentum"].setText("1.5708")        # Mean motion (pi/2 rad/s)
+            
+            # No Pauli — pure gravity/torsion probe
+            self.inputs["pauli"].setText("0.0")
+            self.inputs["vacuum"].setText("0.001")
+            self.inputs["torsion"].setText("1.0")
+            self.inputs["entangled"].setText("0")
+            
+            # Simulation: 8000 ticks = 2 full Keplerian orbits
+            self.inputs["dt"].setText("0.001")
+            self.inputs["total_ticks"].setText("8000")
+            self.inputs["wave_speed"].setText("100.0")
+            
+            # FDTD pilot wave grid active
+            self.pilot_wave_cb.setChecked(True)
+            self.photon_emission_cb.setChecked(False)
+            self.fdtd_gravity_cb.setChecked(False)
+            self.dbb_guidance_cb.setChecked(False)
+            self.spin_coupling_cb.setChecked(False)
+            self.rae_mode_cb.setChecked(True)
         # Disconnect slider auto-compute when leaving that preset
         if not text.endswith("(Free Slider)"):
             self._rae_slider_active = False
@@ -2695,6 +3213,12 @@ class TeleparallelGUI(QMainWindow):
             "rae_mode": 1 if getattr(self, 'rae_mode_cb', None) and self.rae_mode_cb.isChecked() else 0,
             "rae_kappa_scale": float(self.inputs.get("rae_kappa_scale", QLineEdit("1.0")).text()),
             "rae_grad_scale": float(self.inputs.get("rae_grad_scale", QLineEdit("1.0")).text()),
+            "eccentricity": self.inputs["eccentricity"].text(),
+            "free_flight_tick": self.inputs["free_flight_tick"].text(),
+            "sindy_gm": self.inputs["sindy_gm"].text(),
+            "export_pde_grid": 1 if getattr(self, 'pde_export_cb', None) and self.pde_export_cb.isChecked() else 0,
+            "pde_crop_size": self.inputs["pde_crop_size"].text() if "pde_crop_size" in self.inputs else "60.0",
+            "pde_save_interval": self.inputs["pde_save_interval"].text() if "pde_save_interval" in self.inputs else "10",
         }
 
         self.worker = PhysicsWorker(params)
@@ -2705,6 +3229,10 @@ class TeleparallelGUI(QMainWindow):
 
     def append_log(self, text):
         self.log_console.append(text)
+        # Mirror to the command prompt window so you can watch the
+        # matrices, equations, and batch progress scroll in real-time.
+        # flush=True prevents line-buffering delays on Windows.
+        print(text, flush=True)
         # Auto-scroll to bottom
         scrollbar = self.log_console.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -2976,6 +3504,45 @@ class TeleparallelGUI(QMainWindow):
             
             self.append_log(f"Successfully loaded and plotted {len(final_ys)} screen hits out of {len(outcomes)} total trials.")
             self.append_log("Zero transport latency: Web browser JSON bottleneck successfully bypassed.")
+
+            # --- AUTO-SAVE PLOT IMAGE ---
+            # Saves the 4-panel graph widget as a PNG so each run has a
+            # visual record. Critical for the mass sweep: you need to see
+            # how the interference pattern degrades as mass increases.
+            # Also copies aggregate_states.npz so it isn't overwritten.
+            try:
+                import shutil
+                from datetime import datetime
+                
+                results_dir = os.path.join(os.getcwd(), "sweep_results")
+                os.makedirs(results_dir, exist_ok=True)
+                
+                # Build a clean filename from run label + mass
+                mass_val = self.inputs["mass_a"].text()
+                preset_text = self.preset_combo.currentText()
+                # Sanitize: remove characters that break filenames
+                safe_label = preset_text.replace(" ", "_").replace("/", "-")
+                for ch in ['<', '>', ':', '"', '|', '?', '*', '(', ')']:
+                    safe_label = safe_label.replace(ch, '')
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_name = f"m{mass_val}_{safe_label}_{timestamp}"
+                
+                # 1. Save the plot widget as PNG
+                pixmap = self.graph_widget.grab()
+                img_path = os.path.join(results_dir, f"{base_name}.png")
+                pixmap.save(img_path, "PNG")
+                self.append_log(f"[AUTO-SAVE] Plot saved: {img_path}")
+                
+                # 2. Copy aggregate_states.npz so raw data is preserved
+                npz_src = os.path.join(os.getcwd(), "aggregate_states.npz")
+                if os.path.exists(npz_src):
+                    npz_dst = os.path.join(results_dir, f"{base_name}.npz")
+                    shutil.copy2(npz_src, npz_dst)
+                    self.append_log(f"[AUTO-SAVE] Data saved: {npz_dst}")
+                    
+            except Exception as save_err:
+                self.append_log(f"[AUTO-SAVE] Warning: Could not save plot image: {save_err}")
 
         except Exception as e:
             self.append_log(f"Error loading plot data: {str(e)}")

@@ -1,40 +1,47 @@
 #!/usr/bin/env python3
 """
-TEGR Mass-Sweep Experiment: Aspelmeyer Decoherence Prediction
+TEGR Mass-Sweep Experiment: The Heisenberg Cut
 =============================================================
 
-Automates the Tonomura double-slit protocol across a logarithmic mass range
+Automates the double-slit protocol across a logarithmic mass range
 to find the exact m₀ threshold where quantum interference collapses into
 classical behavior.
 
 The TEGR framework predicts decoherence via kinematic phase-shearing
-(Weitzenböck torsional wake overloading the Kuramoto bounding limit),
-which may differ from the standard Diósi-Penrose gravitational self-energy
-prediction. Finding this divergence is the scientific goal.
+(Weitzenböck torsional wake overloading the Cost of Existence bound).
 
 Usage:
-    python aspelmeyer_mass_sweep.py [--gpu] [--batch_size 10000] [--output results.csv]
+    python heisenberg_mass_sweep.py [--gpu] [--batch_size 10000] [--output results.csv]
 """
 
 import subprocess
 import sys
-import json
-import csv
 import os
-import time
+import csv
+import json
 import math
+import time
 import argparse
+
+# Fix Windows cp1252 encoding for Unicode output
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from pathlib import Path
 
 # ─── Configuration ───────────────────────────────────────────────────────
 
-# Baseline: Preset 43 (MOSFET Plane Wave / dBB) parameters
+# Baseline: Preset 43 (MOSFET Plane Wave) parameters — dBB OFF
+# These map directly to teleparallel_collider.py argparse keys
 BASELINE = {
     "mode": "double-slit",
-    "C": 100.0,
-    "slit_width": 1.2,
-    "slit_sep": 2.4,
-    "wall_thickness": 0.5,
+    "mass_a": 0.511,           # Will be overridden per sweep point
+    "mass_b": 1.0,
+    "num_particles": 10000,
+    "slit_width": 5.0,         # Preset 43 value
+    "slit_separation": 6.0,    # Preset 43 value
+    "wall_depth": 3,           # 3-layer thick wall (Preset 43)
+    "wall_z_layers": 1,
     "num_slits": 2,
     "screen_x": 20.0,
     "beam_start_x": -10.0,
@@ -43,30 +50,32 @@ BASELINE = {
     "wave_dissipation": 0.9999,
     "jitter_amp": 0.0,
     "entangled": 0,
-    "pilot_wave": 1,
-    "dbb_guidance": 1,
+    "pauli": 10.0,             # Hardened wall (Preset 43)
+    "pauli_power": 3,          # KK signature (1/r^3)
+    "vacuum": 0.007,           # Preset 43 vacuum coupling
+    "torsion": 1.0,            # Preset 43 torsion
+    "pilot_wave": 1,           # Pilot wave ON
+    "dbb_guidance": 0,         # *** dBB OFF per user directive ***
     "dbb_strength": 0.01,
     "photon_emission": 0,
     "breit_wheeler": 0,
     "bw_threshold": 2.044,
-    "pauli_enabled": 1,
-    "pauli_depth": 3,
-    "pauli_power": 10.0,
-    "plane_wave_init": 1,
-    "plane_wave_amp": 20.0,
-    "torsion_enabled": 0,
-    "vacuum_enabled": 1,
-    "vacuum": 0.01,
+    "plane_wave_init": 1,      # Plane wave ON
+    "plane_wave_amp": 20.0,    # Resonant amplitude
+    "paper1_exact": 0,
+    "spin_coupling": 0,
+    "device": "cuda",          # *** GPU mode ***
 }
+
 
 # Mass sweep: logarithmic spacing from sub-electron to heavy particle
 DEFAULT_MASSES = [
-    0.1, 0.2, 0.3, 0.511,       # Sub-electron → electron
+    0.1, 0.2, 0.3, 0.511,       # Sub-electron -> electron
     0.75, 1.0, 2.0, 5.0,         # Light particles
     10.0, 20.0, 50.0, 100.0,     # Medium
     200.0, 500.0, 938.27,         # Up to proton
     2000.0, 5000.0, 10000.0,      # Heavy
-    50000.0, 100000.0,            # Very heavy (approaching classical?)
+    50000.0, 100000.0,            # Very heavy (approaching classical)
 ]
 
 # Baseline electron parameters for scaling
@@ -100,7 +109,7 @@ def compute_ticks(m0: float, dt: float) -> int:
     return min(ticks, 100000)
 
 
-def run_single_mass(m0: float, batch_size: int, gpu: bool, collider_path: str,
+def run_single_mass(m0: float, batch_size: int, collider_path: str,
                     run_index: int, total_runs: int) -> dict:
     """Run the Tonomura batch for a single mass value and parse results."""
     
@@ -112,18 +121,21 @@ def run_single_mass(m0: float, batch_size: int, gpu: bool, collider_path: str,
     print(f"  dt = {dt:.6f} | ticks = {ticks} | batch = {batch_size}")
     print(f"{'='*60}")
     
-    # Build command
+    # Build command — uses exact CLI keys from teleparallel_collider.py argparse
+    run_label = f"Heisenberg Cut Sweep: m={m0}"
     cmd = [
         sys.executable, collider_path,
         "--mode", BASELINE["mode"],
-        "--m0", str(m0),
-        "--C", str(BASELINE["C"]),
+        "--mass_a", str(m0),
+        "--mass_b", str(BASELINE["mass_b"]),
+        "--num_particles", str(BASELINE["num_particles"]),
         "--dt", str(dt),
         "--total_ticks", str(ticks),
         "--batch_size", str(batch_size),
         "--slit_width", str(BASELINE["slit_width"]),
-        "--slit_sep", str(BASELINE["slit_sep"]),
-        "--wall_thickness", str(BASELINE["wall_thickness"]),
+        "--slit_separation", str(BASELINE["slit_separation"]),
+        "--wall_depth", str(BASELINE["wall_depth"]),
+        "--wall_z_layers", str(BASELINE["wall_z_layers"]),
         "--num_slits", str(BASELINE["num_slits"]),
         "--screen_x", str(BASELINE["screen_x"]),
         "--beam_start_x", str(BASELINE["beam_start_x"]),
@@ -132,24 +144,23 @@ def run_single_mass(m0: float, batch_size: int, gpu: bool, collider_path: str,
         "--wave_dissipation", str(BASELINE["wave_dissipation"]),
         "--jitter_amp", str(BASELINE["jitter_amp"]),
         "--entangled", str(BASELINE["entangled"]),
+        "--pauli", str(BASELINE["pauli"]),
+        "--pauli_power", str(BASELINE["pauli_power"]),
+        "--vacuum", str(BASELINE["vacuum"]),
+        "--torsion", str(BASELINE["torsion"]),
         "--pilot_wave", str(BASELINE["pilot_wave"]),
         "--dbb_guidance", str(BASELINE["dbb_guidance"]),
         "--dbb_strength", str(BASELINE["dbb_strength"]),
-        "--photon_emission", str(BASELINE["photon_emission"]),
         "--breit_wheeler", str(BASELINE["breit_wheeler"]),
         "--bw_threshold", str(BASELINE["bw_threshold"]),
-        "--pauli_enabled", str(BASELINE["pauli_enabled"]),
-        "--pauli_depth", str(BASELINE["pauli_depth"]),
-        "--pauli_power", str(BASELINE["pauli_power"]),
         "--plane_wave_init", str(BASELINE["plane_wave_init"]),
         "--plane_wave_amp", str(BASELINE["plane_wave_amp"]),
-        "--torsion_enabled", str(BASELINE["torsion_enabled"]),
-        "--vacuum_enabled", str(BASELINE["vacuum_enabled"]),
-        "--vacuum", str(BASELINE["vacuum"]),
+        "--paper1_exact", str(BASELINE["paper1_exact"]),
+        "--spin_coupling", str(BASELINE["spin_coupling"]),
+        "--device", BASELINE["device"],
+        "--run_label", run_label,
     ]
-    
-    if gpu:
-        cmd.append("--gpu")
+
     
     start_time = time.time()
     
@@ -259,8 +270,7 @@ def parse_output(output: str, m0: float, dt: float, ticks: int,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="TEGR Mass-Sweep: Aspelmeyer Decoherence Prediction")
-    parser.add_argument("--gpu", action="store_true", help="Use GPU acceleration")
+    parser = argparse.ArgumentParser(description="TEGR Mass-Sweep: The Heisenberg Cut")
     parser.add_argument("--batch_size", type=int, default=BATCH_BASE, help="Particles per batch")
     parser.add_argument("--output", type=str, default="mass_sweep_results.csv", help="Output CSV path")
     parser.add_argument("--masses", type=str, default=None, 
@@ -283,11 +293,11 @@ def main():
         masses = DEFAULT_MASSES
     
     print(f"{'='*60}")
-    print(f"  TEGR MASS-SWEEP: Aspelmeyer Decoherence Prediction")
+    print(f"  TEGR MASS-SWEEP: The Heisenberg Cut")
     print(f"  Masses to sweep: {len(masses)} values")
     print(f"  Range: m₀ = {min(masses):.4f} → {max(masses):.1f}")
     print(f"  Batch size: {args.batch_size}")
-    print(f"  GPU: {'Yes' if args.gpu else 'No'}")
+    print(f"  Device: {BASELINE['device']}")
     print(f"  Output: {args.output}")
     print(f"  Collider: {collider_path}")
     print(f"{'='*60}")
@@ -304,7 +314,7 @@ def main():
     all_results = []
     
     for i, m0 in enumerate(masses, 1):
-        result = run_single_mass(m0, args.batch_size, args.gpu, collider_path, i, len(masses))
+        result = run_single_mass(m0, args.batch_size, collider_path, i, len(masses))
         all_results.append(result)
         
         # Write incrementally so we don't lose data on crash

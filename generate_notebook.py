@@ -1,0 +1,138 @@
+import json
+
+notebook = {
+    "cells": [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "# TEGR: Bodies of Orbit — Results Viewer\n",
+                "\n",
+                "**How to use:**\n",
+                "1. Double-click `LAUNCH_ORBIT.bat` in `Z:\\TEGR Collider\\` to run the physics on the cluster\n",
+                "2. Wait for the terminal to say `COMPLETE`\n",
+                "3. Come back here and press **Run → Run All Cells** to visualize the results"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "import numpy as np\n",
+                "import matplotlib.pyplot as plt\n",
+                "import os\n",
+                "import json\n",
+                "import glob\n",
+                "\n",
+                "# Find the latest SINDy report for the Bodies of Orbit run\n",
+                "sindy_files = sorted(glob.glob('sindy_report_63*'), key=os.path.getmtime, reverse=True)\n",
+                "if sindy_files:\n",
+                "    print(f'Found SINDy report: {sindy_files[0]}')\n",
+                "    with open(sindy_files[0], 'r') as f:\n",
+                "        sindy = json.load(f)\n",
+                "    print('\\n=== SINDY EXTRACTION ===')\n",
+                "    for key, val in sindy.items():\n",
+                "        print(f'  {key}: {val}')\n",
+                "else:\n",
+                "    print('No SINDy report found yet. Run LAUNCH_ORBIT.bat first.')\n",
+                "\n",
+                "# Load trajectory data\n",
+                "if os.path.exists('aggregate_states.npz'):\n",
+                "    data = np.load('aggregate_states.npz', allow_pickle=True)\n",
+                "    print(f'\\nLoaded aggregate_states.npz — keys: {list(data.keys())}')\n",
+                "    if 'states' in data:\n",
+                "        history = data['states']\n",
+                "    elif 'all_states' in data:\n",
+                "        history = data['all_states']\n",
+                "    else:\n",
+                "        first_key = list(data.keys())[0]\n",
+                "        history = data[first_key]\n",
+                "    print(f'Trajectory shape: {history.shape}')\n",
+                "elif os.path.exists('electron_trajectory.npy'):\n",
+                "    history = np.load('electron_trajectory.npy')\n",
+                "    print(f'Loaded electron_trajectory.npy — shape: {history.shape}')\n",
+                "else:\n",
+                "    history = None\n",
+                "    print('No trajectory data found yet. Run LAUNCH_ORBIT.bat first.')"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": [
+                "if history is not None:\n",
+                "    fig, axes = plt.subplots(1, 3, figsize=(18, 6))\n",
+                "    \n",
+                "    # --- Plot 1: Top-Down Orbit ---\n",
+                "    ax = axes[0]\n",
+                "    ax.set_xlim(-40, 40)\n",
+                "    ax.set_ylim(-40, 40)\n",
+                "    ax.set_aspect('equal')\n",
+                "    ax.set_title('Bodies of Orbit: Top-Down View')\n",
+                "    ax.set_xlabel('X (grid units)')\n",
+                "    ax.set_ylabel('Y (grid units)')\n",
+                "    ax.grid(True, alpha=0.3)\n",
+                "    \n",
+                "    # Sun\n",
+                "    ax.plot(history[0, 0, 1], history[0, 0, 2], 'yo', markersize=15, label='Sun', zorder=5)\n",
+                "    # Venus trail\n",
+                "    ax.plot(history[:, 1, 1], history[:, 1, 2], 'r-', alpha=0.4, linewidth=0.5, label='Venus trail')\n",
+                "    # Venus final\n",
+                "    ax.plot(history[-1, 1, 1], history[-1, 1, 2], 'ro', markersize=8, label='Venus (final)', zorder=5)\n",
+                "    ax.legend()\n",
+                "    \n",
+                "    # --- Plot 2: Gamma Over Time ---\n",
+                "    ax2 = axes[1]\n",
+                "    ticks = np.arange(len(history))\n",
+                "    gamma_venus = history[:, 1, 9]\n",
+                "    ax2.plot(ticks, gamma_venus, 'b-', linewidth=0.8)\n",
+                "    ax2.set_title('Venus Gamma Over Time')\n",
+                "    ax2.set_xlabel('Tick')\n",
+                "    ax2.set_ylabel('Gamma')\n",
+                "    ax2.grid(True, alpha=0.3)\n",
+                "    \n",
+                "    # --- Plot 3: Radius Over Time ---\n",
+                "    ax3 = axes[2]\n",
+                "    dx = history[:, 1, 1] - history[:, 0, 1]\n",
+                "    dy = history[:, 1, 2] - history[:, 0, 2]\n",
+                "    r = np.sqrt(dx**2 + dy**2)\n",
+                "    ax3.plot(ticks, r, 'g-', linewidth=0.8)\n",
+                "    ax3.set_title('Orbital Radius Over Time')\n",
+                "    ax3.set_xlabel('Tick')\n",
+                "    ax3.set_ylabel('R (grid units)')\n",
+                "    ax3.axhline(y=20.0, color='r', linestyle='--', alpha=0.5, label='Target R=20')\n",
+                "    ax3.legend()\n",
+                "    ax3.grid(True, alpha=0.3)\n",
+                "    \n",
+                "    plt.tight_layout()\n",
+                "    plt.savefig('bodies_of_orbit_result.png', dpi=150)\n",
+                "    plt.show()\n",
+                "    print('Plot saved to bodies_of_orbit_result.png')\n",
+                "else:\n",
+                "    print('No data to plot.')"
+            ]
+        }
+    ],
+    "metadata": {
+        "kernelspec": {
+            "display_name": "Python 3 (ipykernel)",
+            "language": "python",
+            "name": "python3"
+        },
+        "language_info": {
+            "name": "python",
+            "version": "3.10.0"
+        }
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5
+}
+
+with open("Z:/TEGR Collider/TEGR_Bodies_of_Orbit.ipynb", "w") as f:
+    json.dump(notebook, f, indent=2)
+
+print("Notebook rewritten as results viewer.")

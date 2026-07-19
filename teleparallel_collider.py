@@ -2,11 +2,26 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import numpy as np
+import math
 import time
 import os
 import sys
 import argparse
 import psutil
+
+def solve_kepler(M, e, tol=1e-12, max_iter=50):
+    """Solve Kepler's equation M = E - e*sin(E) via Newton-Raphson."""
+    E = M  # Good initial guess for small eccentricity
+    for _ in range(max_iter):
+        dE = (M - E + e * math.sin(E)) / (1 - e * math.cos(E))
+        E += dE
+        if abs(dE) < tol:
+            break
+    return E
+
+# Fix Windows cp1252 encoding for Unicode output (Greek letters in diagnostics)
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # Create directory for high-res impact frames
 os.makedirs("collider_frames", exist_ok=True)
@@ -101,6 +116,12 @@ parser.add_argument("--qed_compton", type=int, default=0,
                     help="Enable Compton Scattering (Radiation pressure wave)")
 parser.add_argument("--galactic_spin", type=float, default=0.0,
                     help="Angular velocity of the galactic rotation (antenna mode)")
+parser.add_argument("--eccentricity", type=float, default=0.0,
+                    help="Orbital eccentricity for bodies-of-orbit mode (0=circle, 0.0067=Venus)")
+parser.add_argument("--free_flight_tick", type=int, default=-1,
+                    help="Tick at which to release kinematic tracks in bodies-of-orbit mode (-1=never)")
+parser.add_argument("--sindy_gm", type=float, default=19732.53,
+                    help="Extracted SINDy GM to drive gravity during free flight")
 # --- Network & Hardware Dials ---
 parser.add_argument("--device", type=str, default="auto",
                     help="Compute device: auto, cpu, cuda, cuda:0, etc.")
@@ -176,12 +197,24 @@ parser.add_argument("--rae_kappa_scale", type=float, default=1.0,
                     help="Scaling factor for the self-computed soliton defense coefficient kappa")
 parser.add_argument("--rae_grad_scale", type=float, default=1.0,
                     help="Scaling factor for the vacuum grid gradient contribution to phase routing")
+# --- PDE Grid Export (Cost of Existence Discovery) ---
+parser.add_argument("--export_pde_grid", type=int, default=0,
+                    help="Export 2D phi grid slices for PDE discovery (0=off, 1=on)")
+parser.add_argument("--pde_crop_size", type=float, default=60.0,
+                    help="Physical size of the spatial crop in grid units (centered on origin)")
+parser.add_argument("--pde_save_interval", type=int, default=10,
+                    help="Save a grid snapshot every N ticks")
 
 args = parser.parse_args()
 
-# Force Pilot Wave ON if the run label requests it (overrides GUI GUI defaults)
+# Force Pilot Wave ON if the run label requests it (overrides GUI defaults)
 if "Pilot Wave" in args.run_label:
     args.pilot_wave = 1
+
+# Force FDTD Gravity ON if we are exporting the PDE grid
+if args.export_pde_grid:
+    args.fdtd_gravity = 1
+    args.pde_save_interval = 1  # Force 1-tick resolution to prevent time-aliasing of the wave equation
 
 # Early flag: needed by config print block before grid setup
 BW_ENABLED = bool(getattr(args, 'breit_wheeler', 0))
@@ -433,6 +466,8 @@ elif args.mode == 'direct-collapse':
     print(f"N PART:    {args.num_particles} | RADIUS: {args.collapse_radius} | G: {args.collapse_G}")
 elif args.mode == 'gravity-sink':
     print(f"SINK MASS: {args.sink_mass}")
+elif args.mode == 'bodies-of-orbit':
+    print(f"BODIES OF ORBIT: Sun={args.sink_mass} | Venus={args.mass_a} | R={args.collapse_radius} | omega={args.beam_momentum} | e={args.eccentricity}")
 elif args.mode == 'head-on':
     print(f"BEAM P:    {args.beam_momentum} | IMPACT: {args.impact_parameter}")
 print("=" * 60 + "\n")
@@ -582,6 +617,20 @@ elif args.mode == "gravity-sink":
     
     state[0, 8] = 0.0
     state[1, 8] = 3.1415
+
+elif args.mode == "bodies-of-orbit":
+    # Kinematic Constraining: Bodies on Forced Mathematical Tracks
+    # Particle 0 = Venus (forced circular orbit at r = collapse_radius, tracked by SINDy)
+    # Particle 1 = Sun (fixed at origin, mass = sink_mass)
+    
+    state[0, 1] = args.collapse_radius  # Venus starts at (r, 0, 0)
+    state[0, 2] = 0.0
+    state[0, 3] = 0.0
+    state[0, 8] = 3.1415
+    
+    state[1, 7] = args.sink_mass  # Override mass to sink_mass for Sun
+    state[1, 1:4] = 0.0  # Sun at origin
+    state[1, 8] = 0.0
 
 elif args.mode == "double-slit":
     # Double-Slit Ensemble: Beam particles with identical forward momentum, randomized θ_hue
@@ -1053,6 +1102,21 @@ if TORSION_DECAY == 0.0:
     print("[WARNING] Clamping to 1.0 (no decay). Use 0.99 for slight damping, 0.95 for heavy damping.")
     TORSION_DECAY = 1.0
 
+# --- PDE Grid Export Buffer ---
+pde_buffer = []
+pde_laplacian_buffer = []
+if args.export_pde_grid:
+    args.pde_save_interval = 1
+    pde_half_phys = args.pde_crop_size / 2.0  # Half-width in physical units
+    pde_half_px = int(pde_half_phys / DX)     # Half-width in pixels
+    pde_center = GRID_RES // 2                # Origin = grid center
+    pde_i0 = max(0, pde_center - pde_half_px)
+    pde_i1 = min(GRID_RES, pde_center + pde_half_px)
+    pde_crop_px = pde_i1 - pde_i0
+    print(f"[PDE EXPORT] Crop: {pde_crop_px}x{pde_crop_px} pixels ({args.pde_crop_size} grid units), "
+          f"saving every {args.pde_save_interval} ticks")
+    print(f"[PDE EXPORT] Estimated file size: {(8000 // args.pde_save_interval) * pde_crop_px * pde_crop_px * 4 / 1e6:.1f} MB")
+
 # --- Plane Wave Initialization (Preset 41) ---
 if getattr(args, 'plane_wave_init', 0):
     print(f"\n[CUSTOM WAVE INIT] Initializing coherent {getattr(args, 'wave_shape', 'plane')} wave in grid...")
@@ -1304,7 +1368,7 @@ def run_ticks(current_state, ticks, save_history=True):
             v_diff = vel.unsqueeze(1) - vel.unsqueeze(0)
             
             if args.torsion_enabled:
-                torsion_force = torch.sum(TORSION_G * diff * torch.cross(diff, v_diff, dim=2) / dist_sq.unsqueeze(2)**2, dim=1)
+                torsion_force = torch.sum(TORSION_G * torch.cross(diff, torch.cross(diff, v_diff, dim=2), dim=2) / dist_sq.unsqueeze(2)**2, dim=1)
             else:
                 torsion_force = torch.zeros_like(pos)
             
@@ -1387,6 +1451,17 @@ def run_ticks(current_state, ticks, save_history=True):
                 else:
                     # Newtonian Instantaneous Gravity: F = - G * M * m0 * r_vec / r^3
                     grav_force = -(G * M * m0) * diff_grav / (dist_grav_sq ** 1.5)
+            elif args.mode == "bodies-of-orbit":
+                # Kinematic Override: zero out all forces when on tracks.
+                # In free flight, use the extracted SINDy GM to drive the orbit.
+                if tick < args.free_flight_tick or args.free_flight_tick == -1:
+                    grav_force = torch.zeros_like(pos)
+                else:
+                    # Newtonian Instantaneous Gravity using SINDy-derived GM
+                    sink_pos = torch.tensor([0.0, 0.0, 0.0], device=device)
+                    diff_grav = pos - sink_pos
+                    dist_grav_sq = torch.sum(diff_grav**2, dim=1).unsqueeze(1) + 1e-6
+                    grav_force = -(args.sindy_gm * m0) * diff_grav / (dist_grav_sq ** 1.5)
             elif args.mode in ["direct-collapse", "holographic", "holographic-shell", "holographic-ring", "ads-cft"]:
                 # Full N-Body Newtonian Gravity calculation (Vectorized)
                 G_local = args.collapse_G if args.mode == "direct-collapse" else 100.0
@@ -1545,6 +1620,58 @@ def run_ticks(current_state, ticks, save_history=True):
             
         # Position, Phase, and Proper Time Updates (shared by both modes)
         current_state[:, 1:4] += vel_new * DT
+        
+        # --- BODIES OF ORBIT: KINEMATIC TRACK OVERRIDE ---
+        if args.mode == "bodies-of-orbit":
+            t_now = tick * DT
+            n_motion = args.beam_momentum   # Mean motion (rad/sim-sec)
+            a_orb    = args.collapse_radius  # Semi-major axis
+            ecc      = args.eccentricity     # Eccentricity
+            m0_venus = current_state[0, 7]   # Venus rest mass
+            
+            if tick < args.free_flight_tick or args.free_flight_tick == -1:
+                if ecc > 1e-12:
+                    # --- KEPLERIAN ELLIPTICAL ORBIT ---
+                    M = n_motion * t_now                      # Mean anomaly
+                    E = solve_kepler(M, ecc)                  # Eccentric anomaly
+                    # True anomaly
+                    theta = 2.0 * math.atan2(
+                        math.sqrt(1.0 + ecc) * math.sin(E / 2.0),
+                        math.sqrt(1.0 - ecc) * math.cos(E / 2.0)
+                    )
+                    r_now = a_orb * (1.0 - ecc * math.cos(E))  # Instantaneous radius
+                    
+                    # Position
+                    current_state[0, 1] = r_now * math.cos(theta)
+                    current_state[0, 2] = r_now * math.sin(theta)
+                    current_state[0, 3] = 0.0
+                    
+                    # Velocity from orbital mechanics
+                    dE_dt = n_motion / (1.0 - ecc * math.cos(E))
+                    h = n_motion * a_orb**2 * math.sqrt(1.0 - ecc**2)  # Specific angular momentum
+                    dtheta_dt = h / (r_now * r_now)
+                    dr_dt = a_orb * ecc * math.sin(E) * dE_dt
+                    
+                    vx = dr_dt * math.cos(theta) - r_now * dtheta_dt * math.sin(theta)
+                    vy = dr_dt * math.sin(theta) + r_now * dtheta_dt * math.cos(theta)
+                    
+                    current_state[0, 4] = vx * m0_venus
+                    current_state[0, 5] = vy * m0_venus
+                    current_state[0, 6] = 0.0
+                else:
+                    # --- PERFECT CIRCLE (original behavior) ---
+                    current_state[0, 1] = a_orb * math.cos(n_motion * t_now)
+                    current_state[0, 2] = a_orb * math.sin(n_motion * t_now)
+                    current_state[0, 3] = 0.0
+                    current_state[0, 4] = -a_orb * n_motion * math.sin(n_motion * t_now) * m0_venus
+                    current_state[0, 5] =  a_orb * n_motion * math.cos(n_motion * t_now) * m0_venus
+                    current_state[0, 6] = 0.0
+            
+            current_state[0, 9] = 1.0  # Gamma ~ 1 for non-relativistic orbit
+            
+            # Sun (Particle 1): frozen at origin
+            current_state[1, 1:4] = 0.0
+            current_state[1, 4:7] = 0.0
         
         # =====================================================
         # RELATIVISTIC ADLER EQUATION (RAE)
@@ -1732,7 +1859,9 @@ def run_ticks(current_state, ticks, save_history=True):
                     zmq_socket.send_pyobj({
                         "status": "STREAMING",
                         "chunk_id": tick,
-                        "data": np.array(chunk_buffer) # Shape: (flush_rate, N, 10)
+                        "data": np.array(chunk_buffer),
+                        "pde_grid": np.array(pde_buffer) if args.export_pde_grid else None,
+                        "pde_laplacian": np.array(pde_laplacian_buffer) if args.export_pde_grid else None
                     })
                     # -- NEW: Crash Checkpoint --
                     np.savez("checkpoint_latest.npz", chunk=np.array(chunk_buffer), tick=tick)
@@ -1741,6 +1870,14 @@ def run_ticks(current_state, ticks, save_history=True):
             if tick % 1000 == 0:
                 print(f"Collision Tick {tick}/{ticks} - Gamma Max: {gamma.max().item():.3f}")
                 sys.stdout.flush()
+        
+        # --- PDE Grid Export: Crop 2D z-slice of phi centered on origin ---
+        if args.export_pde_grid:
+            z_center = GRID_RES // 2
+            phi_slice = phi_curr[0, 0, pde_i0:pde_i1, pde_i0:pde_i1, z_center].cpu().numpy().copy()
+            lap_slice = laplacian[0, 0, pde_i0:pde_i1, pde_i0:pde_i1, z_center].cpu().numpy().copy()
+            pde_buffer.append(phi_slice)
+            pde_laplacian_buffer.append(lap_slice)
         
         # Early stopping for single-particle double-slit (Tonomura protocol)
         if args.mode == "double-slit" and N_beam == 1:
@@ -1755,6 +1892,36 @@ def run_ticks(current_state, ticks, save_history=True):
     if save_history:
         print(f"Loop Complete! Elapsed Time: {elapsed:.2f}s")
         print(f"TOTAL_RADIATION_SHED={total_radiation_shed:.6f}")
+    
+    # --- PDE Grid Export: Save to disk ---
+    if args.export_pde_grid and len(pde_buffer) > 0:
+        pde_data = np.array(pde_buffer)  # Shape: (T_snapshots, X_crop, Y_crop)
+        pde_lap_data = np.array(pde_laplacian_buffer)
+        pde_dt = DT * args.pde_save_interval
+        # Compute physical coordinates of the crop
+        pde_x = np.linspace(GRID_MIN + pde_i0 * DX, GRID_MIN + pde_i1 * DX, pde_data.shape[1])
+        pde_y = np.linspace(GRID_MIN + pde_i0 * DX, GRID_MIN + pde_i1 * DX, pde_data.shape[2])
+        np.savez_compressed("pde_telemetry.npz",
+            phi=pde_data,
+            laplacian=pde_lap_data,
+            x_coords=pde_x,
+            y_coords=pde_y,
+            dx=DX,
+            dt_effective=pde_dt,
+            dt_physics=DT,
+            save_interval=args.pde_save_interval,
+            grid_min=GRID_MIN,
+            grid_max=GRID_MAX,
+            crop_size_phys=args.pde_crop_size,
+            wave_speed=WAVE_SPEED,
+            torsion_decay=TORSION_DECAY,
+            sink_mass=args.sink_mass,
+            collapse_G=args.collapse_G
+        )
+        print(f"\n[PDE EXPORT] Saved pde_telemetry.npz — Shape: {pde_data.shape} "
+              f"({(pde_data.nbytes + pde_lap_data.nbytes) / 1e6:.1f} MB)")
+        print(f"[PDE EXPORT] dx={DX:.4f}, dt_effective={pde_dt:.6f}, "
+              f"wave_speed={WAVE_SPEED:.1f}, torsion_decay={TORSION_DECAY}")
         
         print("\n--- SIMULATION RESOURCE USAGE ---")
         process = psutil.Process(os.getpid())
@@ -2144,7 +2311,7 @@ if args.mode in ["double-slit", "quantum-eraser", "heat-sink-eraser", "single-ed
                 if args.torsion_enabled:
                     v_diff = vel_moving.unsqueeze(2) - vel.unsqueeze(1)
                     cross = torch.cross(diff, v_diff, dim=3)
-                    torsion_force = torch.sum(TORSION_G * diff * cross / dist_sq.unsqueeze(3)**2, dim=2)
+                    torsion_force = torch.sum(TORSION_G * torch.cross(diff, cross, dim=3) / dist_sq.unsqueeze(3)**2, dim=2)
                 else:
                     torsion_force = torch.zeros_like(pos_moving)
                 
